@@ -1,0 +1,135 @@
+name: build sd-cli (CUDA)
+
+# Buduje sd-cli z stable-diffusion.cpp pod Colab T4 (sm_75) i publikuje zip jako asset release.
+# Użycie: zakładka Actions -> "build sd-cli (CUDA)" -> Run workflow.
+# Albo: git tag v1 && git push --tags  -> powstanie Release z gotowym zipem.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sd_ref:
+        description: "Ref stable-diffusion.cpp (master albo tag, np. master-1106-532d2c1)"
+        default: master
+        required: true
+      cuda_arch:
+        description: "Architektura CUDA: T4=75, L4=89, A100=80"
+        default: "75"
+        required: true
+      cuda_version:
+        description: "Wersja CUDA toolkit (12.x — 13.x nie wspiera już sm_75)"
+        default: "12.8.1"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  SD_REPO: leejet/stable-diffusion.cpp
+  ASSET: sd-cli-cuda12-sm75-linux-x86_64.zip
+
+jobs:
+  build:
+    # 22.04, nie 24.04: glibc 2.35 uruchomi się zarówno na Colab 22.04, jak i 24.04.
+    # Odwrotnie nie — binarka z 24.04 (glibc 2.39) padnie na starszym obrazie.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wolne miejsce na dysku
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: CUDA toolkit
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: ${{ inputs.cuda_version || '12.8.1' }}
+          method: network
+          # tylko to, co realnie potrzebne do kompilacji ggml — oszczędza ~10 GB
+          sub-packages: '["nvcc","cudart","cublas","cublas_dev","thrust"]'
+
+      - name: Zależności systemowe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git libgomp1 zip
+
+      - name: Pobierz źródła stable-diffusion.cpp
+        run: |
+          REF="${{ inputs.sd_ref || 'master' }}"
+          echo "ref=$REF"
+          git clone --depth 1 --recursive --branch "$REF" \
+            "https://github.com/${{ env.SD_REPO }}.git" src
+          cd src && git rev-parse --short HEAD | tee /tmp/sha.txt
+
+      - name: Konfiguracja CMake
+        run: |
+          ARCH="${{ inputs.cuda_arch || '75' }}"
+          echo "CUDA_ARCHITECTURES=$ARCH"
+          cmake -S src -B src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSD_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES="$ARCH" \
+            -DCMAKE_CUDA_FLAGS="-Wno-deprecated-gpu-targets" \
+            -DSD_BUILD_SHARED_LIBS=ON \
+            -DSD_BUILD_SHARED_GGML_LIB=ON \
+            -DGGML_BACKEND_DL=ON \
+            -DGGML_CPU_ALL_VARIANTS=ON \
+            -DGGML_NATIVE=OFF \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN'
+
+      - name: Kompilacja
+        run: cmake --build src/build --config Release -j"$(nproc)"
+
+      - name: Test dymny
+        run: |
+          set -x
+          ls -la src/build/bin
+          echo "--- ldd (libcublas może być 'not found' — Colab dostarcza ją sam) ---"
+          ldd src/build/bin/sd-cli || true
+          echo "--- sd-cli --help ---"
+          LD_LIBRARY_PATH="$PWD/src/build/bin:${{ steps.cuda.outputs.CUDA_PATH }}/lib64" \
+            ./src/build/bin/sd-cli --help | head -40
+          echo "--- czy build zna preset turbo? ---"
+          LD_LIBRARY_PATH="$PWD/src/build/bin:${{ steps.cuda.outputs.CUDA_PATH }}/lib64" \
+            ./src/build/bin/sd-cli --help 2>&1 | grep -Ei 'sigmas|llm_vision|ref-image' || true
+
+      - name: Pakowanie
+        run: |
+          SHA=$(cat /tmp/sha.txt)
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+          cd src/build/bin
+          zip -r "../../../${{ env.ASSET }}" . -x '*.zip'
+          cd ../../..
+          ls -lh "${{ env.ASSET }}"
+          unzip -l "${{ env.ASSET }}" | head -20
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sd-cli-cuda-${{ env.SHA }}
+          path: ${{ env.ASSET }}
+          retention-days: 30
+
+      - name: Publikacja release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          body: |
+            `sd-cli` z stable-diffusion.cpp @ ${{ env.SHA }}, CUDA ${{ inputs.cuda_version || '12.8.1' }}, sm_${{ inputs.cuda_arch || '75' }}.
+            Zbudowane na Ubuntu 22.04 (glibc 2.35) — działa na Colab T4.
+
+            Pobranie w notatniku:
+            `https://github.com/${{ github.repository }}/releases/latest/download/${{ env.ASSET }}`
