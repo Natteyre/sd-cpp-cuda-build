@@ -31,10 +31,13 @@ env:
 
 jobs:
   build:
-    # 22.04, nie 24.04: glibc 2.35 uruchomi się zarówno na Colab 22.04, jak i 24.04.
-    # Odwrotnie nie — binarka z 24.04 (glibc 2.39) padnie na starszym obrazie.
+    # Kontener z CUDA 12.4 + Ubuntu 22.04 (glibc 2.35) — to co w Dockerfile.cuda sd.cpp.
+    # Unika problemów z pakietami NVIDIA repo i daje gotowe nvcc/cudart/cublas.
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
+      options: --gpus all
 
     steps:
       - uses: actions/checkout@v4
@@ -50,20 +53,13 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - name: CUDA toolkit
-        id: cuda
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: ${{ inputs.cuda_version || '12.8.1' }}
-          method: network
-          # tylko to, co realnie potrzebne do kompilacji ggml — oszczędza ~10 GB
-          sub-packages: '["nvcc","cudart","cublas","cublas_dev","thrust"]'
-
       - name: Zależności systemowe
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get update
+          apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git libgomp1 zip
+        env:
+          DEBIAN_FRONTEND: noninteractive
 
       - name: Pobierz źródła stable-diffusion.cpp
         run: |
@@ -100,10 +96,10 @@ jobs:
           echo "--- ldd (libcublas może być 'not found' — Colab dostarcza ją sam) ---"
           ldd src/build/bin/sd-cli || true
           echo "--- sd-cli --help ---"
-          LD_LIBRARY_PATH="$PWD/src/build/bin:${{ steps.cuda.outputs.CUDA_PATH }}/lib64" \
+          LD_LIBRARY_PATH="$PWD/src/build/bin:/usr/local/cuda/lib64" \
             ./src/build/bin/sd-cli --help | head -40
           echo "--- czy build zna preset turbo? ---"
-          LD_LIBRARY_PATH="$PWD/src/build/bin:${{ steps.cuda.outputs.CUDA_PATH }}/lib64" \
+          LD_LIBRARY_PATH="$PWD/src/build/bin:/usr/local/cuda/lib64" \
             ./src/build/bin/sd-cli --help 2>&1 | grep -Ei 'sigmas|llm_vision|ref-image' || true
 
       - name: Pakowanie
