@@ -37,7 +37,7 @@ jobs:
     timeout-minutes: 120
     container:
       image: nvidia/cuda:12.4.1-devel-ubuntu22.04
-      options: --gpus all
+      # --gpus all NIE dziala na GitHub Actions runnerach (brak GPU) — toolkit wystarczy do kompilacji
 
     steps:
       - uses: actions/checkout@v4
